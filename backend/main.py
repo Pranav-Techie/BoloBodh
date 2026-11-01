@@ -25,9 +25,15 @@ app = FastAPI(
     version="0.9.0",
 )
 
+# Allow the deployed Vercel frontend and local Vite development servers.
+# Add any additional trusted frontend origin here if you use one.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "https://bolo-bodh.vercel.app",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -45,8 +51,6 @@ OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 SUPPORTED_LANGUAGES = {
     "English": "en-IN",
     "Hindi": "hi-IN",
-    # Hinglish uses Hindi recognition as the closest supported speech locale.
-    "Hinglish": "hi-IN",
     "Tamil": "ta-IN",
     "Bengali": "bn-IN",
     "Telugu": "te-IN",
@@ -62,8 +66,6 @@ TTS_LANGUAGES = SUPPORTED_LANGUAGES.copy()
 DEFAULT_TTS_VOICES = {
     "English": "Yashvi",
     "Hindi": "Deepak",
-    # Hinglish speech is sent to the Hindi TTS locale; Roman-script pronunciation must be tested.
-    "Hinglish": "Deepak",
     "Tamil": "Brinda",
     "Bengali": "Yashvi",
     "Telugu": "Yashvi",
@@ -315,54 +317,11 @@ def speech_to_text(
             detail = f"Gnani did not return a usable transcript: {provider_message}"
         raise HTTPException(status_code=502, detail=detail)
 
-    # Gnani may return Devanagari even when the learner speaks mixed Hindi/English.
-    # Normalize that transcript according to the profile language so the review box
-    # and tutor receive the intended script/language.
-    transcript_note = None
-    has_devanagari = bool(re.search(r"[\u0900-\u097F]", transcript))
-    if has_devanagari and language in {"English", "Hinglish"} and OPENAI_API_KEY:
-        if language == "English":
-            normalize_prompt = f"""
-Convert this speech-recognition transcript into clear, concise English.
-Translate any Hindi words into English while preserving the student's exact intent.
-Keep scientific/technical terms accurate. Return only the corrected English transcript,
-with no explanation or quotation marks.
-
-Transcript:
-{transcript}
-""".strip()
-        else:
-            normalize_prompt = f"""
-Transliterate this Hindi/Hinglish speech-recognition transcript into natural Hinglish
-written ONLY with Latin/Roman letters. Preserve the spoken meaning and familiar Hindi
-words; do not translate it into formal English and do not use Devanagari script.
-Return only the Roman-script transcript, with no explanation or quotation marks.
-
-Transcript:
-{transcript}
-""".strip()
-        try:
-            normalized = _openai_generate_text(normalize_prompt, max_output_tokens=300)
-            if normalized and normalized.strip():
-                transcript = normalized.strip().strip('"“”')
-                transcript_note = (
-                    "Speech transcript converted to English for your English profile."
-                    if language == "English"
-                    else "Speech transcript written in Roman-script Hinglish."
-                )
-        except HTTPException as exc:
-            # Keep speech-to-text usable if optional transcript normalization fails.
-            print("Transcript normalization skipped:", exc.detail)
-            transcript_note = "Transcript normalization was unavailable; please review the transcript."
-    elif has_devanagari and language in {"English", "Hinglish"}:
-        transcript_note = "Transcript may need manual correction because OpenAI normalization is not configured."
-
     return {
         "status": "success",
         "language": language,
         "language_code": language_code,
         "transcript": transcript,
-        "transcript_note": transcript_note,
     }
 
 
@@ -379,33 +338,19 @@ def submit_question(payload: QuestionRequest):
     if not OPENAI_API_KEY:
         raise HTTPException(status_code=503, detail="OpenAI is not configured. Add OPENAI_API_KEY to backend/.env.")
 
-    if language == "Hinglish":
-        language_instructions = "Answer in natural, conversational Hinglish written ONLY in Latin/Roman letters. Use Hindi words and familiar Hinglish phrasing, for example: 'Baarish tab hoti hai jab badalon mein paani ki boondein milkar bhaari ho jaati hain aur neeche girti hain.' Do not use Devanagari script. Do not switch to formal English. Keep technical terms simple."
-    elif language == "Hindi":
-        language_instructions = "Answer in natural, simple Hindi using Devanagari script, even if the student's question is typed in English letters or Hinglish. Do not answer in English just because the question is written in Roman letters."
-    elif language == "English":
-        language_instructions = (
-            "Answer entirely in clear, simple English using Latin letters, even if the "
-            "student's question contains Hindi, Hinglish, or Devanagari text. Translate "
-            "the intent of the question into English; do not answer in Hindi or Hinglish."
-        )
-    else:
-        language_instructions = f"Answer entirely in {language}, using the normal script for that language."
-
     prompt = f"""
 You are BoloBodh AI, a friendly, patient tutor for Indian students.
 Student grade/class: {grade}
 Preferred response language: {language}
 Student question: {question}
 
-{language_instructions}
-Include headings, examples, encouragement, and any closing sentence in the selected response style.
-Adapt the depth, vocabulary, sentence length, and examples to the student's selected class.
-For Classes 1–4, use very short sentences, familiar everyday examples, and explain one idea at a time.
-For Classes 5–8, give a clear step-by-step explanation and age-appropriate subject terminology, defining difficult words simply.
-Never assume the student already knows advanced concepts. If the question is beyond the student's class level, gently explain the foundation first.
-When useful, end with a short, warm, language-appropriate encouragement such as “Good job!”, “Keep practising!”, or the natural equivalent in {language}; do not force the same phrase into every answer.
-Do not use Markdown heading markers such as # or ##, do not prefix headings with #1/#2, and do not repeat numbered labels. Avoid unnecessary English words unless they are proper names or technical terms that should remain in English. Use plain text and simple bullets only. If uncertain, say so rather than inventing facts.
+Answer entirely in {language}, including headings, examples, and any closing sentence.
+Start with a direct answer, then explain in short, separated paragraphs using
+vocabulary suitable for the student's grade. Use simple examples when helpful.
+Do not use Markdown heading markers such as # or ##, do not prefix headings with
+#1/#2, and do not repeat numbered labels. Avoid English words unless they are
+proper names or technical terms that should remain in English. Use plain text
+and simple bullets only. If uncertain, say so rather than inventing facts.
 """.strip()
 
     answer = _clean_student_text(_openai_generate_text(prompt, max_output_tokens=2500))
@@ -680,18 +625,10 @@ async def summarize_pdf(
     if not grade or len(grade) > 30:
         raise HTTPException(status_code=400, detail="Please select a valid grade.")
 
-    summary_script_rule = (
-        "Write the entire summary in natural Hinglish using ONLY Latin/Roman letters; do not use Devanagari."
-        if language == "Hinglish" else
-        "Write the entire summary in simple Hindi using Devanagari script, even if the source text is in English letters."
-        if language == "Hindi" else
-        f"Use the normal writing script for {language}."
-    )
     prompt = f"""
 You are BoloBodh AI, a patient tutor for Indian students.
 Student grade/class: {grade}
 Required summary language: {language}
-Script requirement: {summary_script_rule}
 
 Summarize the supplied PDF text for this student entirely in {language}.
 Use short plain-text headings without Markdown # characters, simple explanations,
@@ -752,18 +689,10 @@ def generate_quiz(payload: QuizRequest):
         raise HTTPException(status_code=422, detail="Please select the student's grade and language.")
 
     count = payload.num_questions
-    quiz_script_rule = (
-        "Write all question text, options, title, and explanations in natural Hinglish using ONLY Latin/Roman letters; do not use Devanagari."
-        if language == "Hinglish" else
-        "Write all question text, options, title, and explanations in simple Hindi using Devanagari script."
-        if language == "Hindi" else
-        f"Use the normal writing script for {language}."
-    )
     prompt = f"""
 You create reliable school quizzes for BoloBodh AI.
 Student grade/class: {grade}
 Output language: {language}
-Script requirement: {quiz_script_rule}
 Difficulty: {payload.difficulty}
 Required number of questions: exactly {count}
 
