@@ -187,7 +187,7 @@ async function convertAudioBlobToWav(blob) {
   }
 }
 
-const API_BASE_URL = "http://127.0.0.1:8000";
+const API_BASE_URL = "https://bolobodh-api.onrender.com";
 
 export default function StudentDashboard({ user, onLogout }) {
   const [studentName, setStudentName] = useState(
